@@ -12,7 +12,6 @@ module EDInitMod
   use FatesGlobals              , only : fates_log
   use FatesInterfaceMod         , only : hlm_is_restart
   use EDPftvarcon               , only : EDPftvarcon_inst
-  use EDGrowthFunctionsMod      , only : bdead, bleaf, dbh
   use EDCohortDynamicsMod       , only : create_cohort, fuse_cohorts, sort_cohorts
   use EDPatchDynamicsMod        , only : create_patch
   use EDTypesMod                , only : ed_site_type, ed_patch_type, ed_cohort_type
@@ -25,6 +24,14 @@ module EDInitMod
   use FatesInterfaceMod         , only : hlm_use_inventory_init
   use FatesInterfaceMod         , only : numpft
   use ChecksBalancesMod         , only : SiteCarbonStock
+  use FatesInterfaceMod         , only : nlevsclass
+  use FatesAllometryMod         , only : h2d_allom
+  use FatesAllometryMod         , only : bag_allom
+  use FatesAllometryMod         , only : bcr_allom
+  use FatesAllometryMod         , only : bleaf
+  use FatesAllometryMod         , only : bfineroot
+  use FatesAllometryMod         , only : bsap_allom
+  use FatesAllometryMod         , only : bdead_allom
 
   ! CIME GLOBALS
   use shr_log_mod               , only : errMsg => shr_log_errMsg
@@ -38,6 +45,7 @@ module EDInitMod
         __FILE__
 
   public  :: zero_site
+  public  :: init_site_vars
   public  :: init_patches
   public  :: set_site_properties
   private :: init_cohorts
@@ -48,6 +56,25 @@ contains
 
   ! ============================================================================
 
+  subroutine init_site_vars( site_in )
+    !
+    ! !DESCRIPTION:
+    !
+    !
+    ! !ARGUMENTS    
+    type(ed_site_type), intent(inout) ::  site_in
+    !
+    ! !LOCAL VARIABLES:
+    !----------------------------------------------------------------------
+    !
+    allocate(site_in%terminated_nindivs(1:nlevsclass,1:numpft,2))
+    allocate(site_in%demotion_rate(1:nlevsclass))
+    allocate(site_in%promotion_rate(1:nlevsclass))
+    allocate(site_in%imort_rate(1:nlevsclass,1:numpft))
+    !
+    end subroutine init_site_vars
+
+  ! ============================================================================
   subroutine zero_site( site_in )
     !
     ! !DESCRIPTION:
@@ -95,6 +122,8 @@ contains
     site_in%terminated_nindivs(:,:,:) = 0._r8
     site_in%termination_carbonflux(:) = 0._r8
     site_in%recruitment_rate(:) = 0._r8
+    site_in%imort_rate(:,:) = 0._r8
+    site_in%imort_carbonflux = 0._r8
 
     ! demotion/promotion info
     site_in%demotion_rate(:) = 0._r8
@@ -110,6 +139,9 @@ contains
     
     ! Resources management (logging/harvesting, etc)
     site_in%resources_management%trunk_product_site  = 0.0_r8
+
+    ! canopy spread
+    site_in%spread = 0._r8
 
   end subroutine zero_site
 
@@ -187,7 +219,7 @@ contains
        sites(s)%frac_burnt = 0.0_r8
        sites(s)%old_stock  = 0.0_r8
 
-
+       sites(s)%spread     = 1.0_r8
     end do
 
     return
@@ -204,7 +236,6 @@ contains
      !
      
 
-     use EDParamsMod            , only : ED_val_maxspread
      use FatesPlantHydraulicsMod, only : updateSizeDepRhizHydProps 
      use FatesInventoryInitMod,   only : initialize_sites_by_inventory
 
@@ -218,7 +249,6 @@ contains
      integer  :: s
      real(r8) :: cwd_ag_local(ncwd)
      real(r8) :: cwd_bg_local(ncwd)
-     real(r8) :: spread_local(nclmax)
      real(r8) :: leaf_litter_local(maxpft)
      real(r8) :: root_litter_local(maxpft)
      real(r8) :: age !notional age of this patch
@@ -237,7 +267,6 @@ contains
      cwd_bg_local(:)      = 0.0_r8 !ED_val_init_litter
      leaf_litter_local(:) = 0.0_r8
      root_litter_local(:) = 0.0_r8
-     spread_local(:)      = ED_val_maxspread
      age                  = 0.0_r8
      ! ---------------------------------------------------------------------------------------------
 
@@ -276,7 +305,7 @@ contains
 
            ! make new patch...
            call create_patch(sites(s), newp, age, AREA, &
-                 spread_local, cwd_ag_local, cwd_bg_local, leaf_litter_local,  &
+                 cwd_ag_local, cwd_bg_local, leaf_litter_local,  &
                  root_litter_local) 
 
            call init_cohorts(newp, bc_in(s))
@@ -313,8 +342,13 @@ contains
     !
     ! !LOCAL VARIABLES:
     type(ed_cohort_type),pointer :: temp_cohort
-    integer :: cstatus
-    integer :: pft
+    integer  :: cstatus
+    integer  :: pft
+    real(r8) :: b_ag    ! biomass above ground [kgC]
+    real(r8) :: b_cr    ! biomass in coarse roots [kgC]
+    real(r8) :: b_leaf  ! biomass in leaves [kgC]
+    real(r8) :: b_fineroot ! biomass in fine roots [kgC]
+    real(r8) :: b_sapwood  ! biomass in sapwood [kgC]
     !----------------------------------------------------------------------
 
     patch_in%tallest  => null()
@@ -329,27 +363,47 @@ contains
        temp_cohort%pft         = pft
        temp_cohort%n           = EDPftvarcon_inst%initd(pft) * patch_in%area
        temp_cohort%hite        = EDPftvarcon_inst%hgt_min(pft)
-       !temp_cohort%n           = 0.5_r8 * 0.0028_r8 * patch_in%area  ! BOC for fixed size runs EDPftvarcon_inst%initd(pft) * patch_in%area
-       !temp_cohort%hite        = 28.65_r8                            ! BOC translates to DBH of 50cm. EDPftvarcon_inst%hgt_min(pft)
-       temp_cohort%dbh         = Dbh(temp_cohort) ! FIX(RF, 090314) - comment out addition of ' + 0.0001_r8*pft   '  - seperate out PFTs a little bit...
+
+       ! Calculate the plant diameter from height
+       call h2d_allom(temp_cohort%hite,pft,temp_cohort%dbh)
+
        temp_cohort%canopy_trim = 1.0_r8
-       temp_cohort%bdead       = Bdead(temp_cohort)
-       temp_cohort%balive      = Bleaf(temp_cohort)*(1.0_r8 + EDPftvarcon_inst%allom_l2fr(pft) &
-            + EDPftvarcon_inst%allom_latosa_int(temp_cohort%pft)*temp_cohort%hite)
-       temp_cohort%b           = temp_cohort%balive + temp_cohort%bdead
+
+       ! Calculate total above-ground biomass from allometry
+       call bag_allom(temp_cohort%dbh,temp_cohort%hite,pft,b_ag)
+
+       ! Calculate coarse root biomass from allometry
+       call bcr_allom(temp_cohort%dbh,temp_cohort%hite,pft,b_cr)
+
+       ! Calculate the leaf biomass 
+       ! (calculates a maximum first, then applies canopy trim)
+       call bleaf(temp_cohort%dbh,temp_cohort%hite,pft,temp_cohort%canopy_trim,b_leaf)
+
+       ! Calculate fine root biomass
+       ! (calculates a maximum and then trimming value)
+       call bfineroot(temp_cohort%dbh,temp_cohort%hite,pft,temp_cohort%canopy_trim,b_fineroot)
+
+       ! Calculate sapwood biomass
+       call bsap_allom(temp_cohort%dbh,pft,temp_cohort%canopy_trim,b_sapwood)
+       
+       temp_cohort%balive = b_leaf + b_fineroot + b_sapwood
+
+       call bdead_allom( b_ag, b_cr, b_sapwood, pft, temp_cohort%bdead )
+
+       temp_cohort%b = temp_cohort%balive + temp_cohort%bdead
 
        if( EDPftvarcon_inst%evergreen(pft) == 1) then
-          temp_cohort%bstore = Bleaf(temp_cohort) * EDPftvarcon_inst%cushion(pft)
+          temp_cohort%bstore = b_leaf * EDPftvarcon_inst%cushion(pft)
           temp_cohort%laimemory = 0._r8
           cstatus = 2
        endif
 
        if( EDPftvarcon_inst%season_decid(pft) == 1 ) then !for dorment places
-          temp_cohort%bstore = Bleaf(temp_cohort) * EDPftvarcon_inst%cushion(pft) !stored carbon in new seedlings.
+          temp_cohort%bstore = b_leaf * EDPftvarcon_inst%cushion(pft) !stored carbon in new seedlings.
           if(patch_in%siteptr%status == 2)then 
              temp_cohort%laimemory = 0.0_r8
           else
-             temp_cohort%laimemory = Bleaf(temp_cohort)
+             temp_cohort%laimemory = b_leaf
           endif
           ! reduce biomass according to size of store, this will be recovered when elaves com on.
           temp_cohort%balive = temp_cohort%balive - temp_cohort%laimemory
@@ -357,8 +411,8 @@ contains
        endif
 
        if ( EDPftvarcon_inst%stress_decid(pft) == 1 ) then
-          temp_cohort%bstore = Bleaf(temp_cohort) * EDPftvarcon_inst%cushion(pft)
-          temp_cohort%laimemory = Bleaf(temp_cohort)
+          temp_cohort%bstore = b_leaf * EDPftvarcon_inst%cushion(pft)
+          temp_cohort%laimemory = b_leaf
           temp_cohort%balive = temp_cohort%balive - temp_cohort%laimemory
           cstatus = patch_in%siteptr%dstatus
        endif

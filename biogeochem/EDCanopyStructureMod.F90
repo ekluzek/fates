@@ -8,8 +8,10 @@ module EDCanopyStructureMod
   use FatesConstantsMod     , only : r8 => fates_r8
   use FatesGlobals          , only : fates_log
   use EDPftvarcon           , only : EDPftvarcon_inst
-  use EDGrowthFunctionsMod  , only : c_area
+  use FatesAllometryMod     , only : carea_allom
   use EDCohortDynamicsMod   , only : copy_cohort, terminate_cohorts, fuse_cohorts
+  use EDCohortDynamicsMod   , only : tree_lai
+  use EDCohortDynamicsMod   , only : tree_sai
   use EDtypesMod            , only : ed_site_type, ed_patch_type, ed_cohort_type, ncwd
   use EDTypesMod            , only : nclmax
   use EDTypesMod            , only : nlevleaf
@@ -317,7 +319,9 @@ contains
          rankordered_area_sofar = 0.0_r8
          currentCohort => currentPatch%tallest 
          do while (associated(currentCohort))
-            currentCohort%c_area = c_area(currentCohort)
+
+            call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
+
             if(arealayer > currentPatch%area.and.currentCohort%canopy_layer == i_lyr)then
                if (ED_val_comp_excln .ge. 0.0_r8 ) then
                   ! normal (stochastic) case. weight cohort demotion by inverse size to a constant power
@@ -443,9 +447,10 @@ contains
                         currentCohort%n = 0.0_r8
                         currentCohort%c_area = 0._r8
                      else  
-                        currentCohort%c_area = c_area(currentCohort)       
+                        call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
                      endif
-                     copyc%c_area = c_area(copyc)
+                     
+                     call carea_allom(copyc%dbh,copyc%n,currentSite%spread,copyc%pft,copyc%c_area)
 
 
                      !----------- Insert copy into linked list ------------------------!                         
@@ -517,7 +522,7 @@ contains
                         currentCohort%c_area = 0._r8
 
                      else  
-                        currentCohort%c_area = c_area(currentCohort)       
+                        call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
                      endif
 
                   endif ! matches: if (cc_loss < currentCohort%c_area)then
@@ -619,8 +624,7 @@ contains
             do while (associated(currentCohort))            
                if(currentCohort%canopy_layer == i_lyr+1)then !look at the cohorts in the canopy layer below... 
                   currentCohort%canopy_layer = i_lyr   
-                  currentCohort%c_area = c_area(currentCohort)
-                  
+                  call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
                   ! keep track of number and biomass of promoted cohort
                   currentSite%promotion_rate(currentCohort%size_class) = &
                         currentSite%promotion_rate(currentCohort%size_class) + currentCohort%n
@@ -639,7 +643,7 @@ contains
          ! This is the opposite of the demotion weighting... 
          currentCohort => currentPatch%tallest 
          do while (associated(currentCohort))
-            currentCohort%c_area = c_area(currentCohort)
+            call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
             if(currentCohort%canopy_layer == i_lyr+1)then !look at the cohorts in the canopy layer below... 
                if (ED_val_comp_excln .ge. 0.0_r8 ) then
                   ! normal (stochastic) case, as above.
@@ -720,8 +724,8 @@ contains
                      currentCohort%dbh = currentCohort%dbh - 0.000000000001_r8 
                      copyc%dbh = copyc%dbh + 0.000000000001_r8
                      
-                     currentCohort%c_area = c_area(currentCohort)          
-                     copyc%c_area = c_area(copyc)
+                     call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
+                     call carea_allom(copyc%dbh,copyc%n,currentSite%spread,copyc%pft,copyc%c_area)
                          
                      !----------- Insert copy into linked list ------------------------!                         
                      copyc%shorter => currentCohort
@@ -738,8 +742,8 @@ contains
                      
                      ! update area AFTER we sum up the losses. the cohort may shrink at this point,
                      ! if the upper canopy spread is smaller. this shold be dealt with by the 'excess area' loop.  
-                     currentCohort%c_area = c_area(currentCohort) 
-                     
+                     call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
+
                      ! keep track of number and biomass of promoted cohort
                      currentSite%promotion_rate(currentCohort%size_class) = &
                            currentSite%promotion_rate(currentCohort%size_class) + currentCohort%n
@@ -802,7 +806,8 @@ contains
     !  Calculates the spatial spread of tree canopies based on canopy closure.                             
     !
     ! !USES:
-    use EDParamsMod , only : ED_val_maxspread, ED_val_minspread 
+    use EDTypesMod        , only : AREA
+    use EDParamsMod, only : ED_val_canopy_closure_thresh    
     !
     ! !ARGUMENTS    
     type (ed_site_type), intent(inout), target :: currentSite
@@ -810,50 +815,41 @@ contains
     ! !LOCAL VARIABLES:
     type (ed_cohort_type), pointer :: currentCohort
     type (ed_patch_type) , pointer :: currentPatch
-    real(r8) :: arealayer(nlevleaf) ! Amount of canopy in each layer. 
+    real(r8) :: sitelevel_canopyarea  ! Amount of canopy in top layer at the site level
     real(r8) :: inc                   ! Arbitrary daily incremental change in canopy area 
     integer  :: z
     !----------------------------------------------------------------------
 
-    inc = 0.005_r8
+    inc = 0.05_r8
 
     currentPatch => currentSite%oldest_patch
 
+    sitelevel_canopyarea = 0.0_r8   
     do while (associated(currentPatch))
 
-       !calculate canopy area in each canopy storey...
-       arealayer = 0.0_r8   
+       !calculate canopy area in each patch...
        currentCohort => currentPatch%tallest
        do while (associated(currentCohort))
-          currentCohort%c_area = c_area(currentCohort) 
-          if(EDPftvarcon_inst%woody(currentCohort%pft) == 1)then
-             arealayer(currentCohort%canopy_layer) = arealayer(currentCohort%canopy_layer) + currentCohort%c_area
+          call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
+          if(EDPftvarcon_inst%woody(currentCohort%pft) .eq. 1 .and. currentCohort%canopy_layer .eq. 1 ) then
+             sitelevel_canopyarea = sitelevel_canopyarea + currentCohort%c_area
           endif
           currentCohort => currentCohort%shorter
        enddo
 
-       !If the canopy area is approaching closure, squash the tree canopies and make them taller and thinner
-       do z = 1,nclmax  
-         
-          if(arealayer(z)/currentPatch%area > 0.9_r8)then
-             currentPatch%spread(z) = currentPatch%spread(z) - inc
-          else 
-             currentPatch%spread(z) = currentPatch%spread(z) + inc 
-          endif
-          if(currentPatch%spread(z) >= ED_val_maxspread)then 
-             currentPatch%spread(z) = ED_val_maxspread
-          endif
-          if(currentPatch%spread(z) <=  ED_val_minspread)then
-             currentPatch%spread(z) = ED_val_minspread
-          endif
-        enddo !z
-        !write(fates_log(),*) 'spread',currentPatch%spread(1:2)
-        !currentPatch%spread(:) = ED_val_maxspread
-        !FIX(RF,033114) spread is off
-        !write(fates_log(),*) 'canopy_spread',currentPatch%area,currentPatch%spread(1:2)
-        currentPatch => currentPatch%younger
+       currentPatch => currentPatch%younger
 
     enddo !currentPatch
+
+    !If the canopy area is approaching closure, squash the tree canopies and make them taller and thinner
+    if( sitelevel_canopyarea/AREA .gt. ED_val_canopy_closure_thresh ) then
+       currentSite%spread = currentSite%spread - inc
+    else 
+       currentSite%spread = currentSite%spread + inc 
+    endif
+
+    ! put within bounds to make sure it stays between 0 and 1
+    currentSite%spread = max(min(currentSite%spread, 1._r8), 0._r8)
 
   end subroutine canopy_spread
 
@@ -869,8 +865,7 @@ contains
     use FatesInterfaceMod    , only : bc_in_type
     use EDPatchDynamicsMod   , only : set_patchno
     use EDPatchDynamicsMod   , only : set_root_fraction
-    use EDTypesMod           , only : sizetype_class_index
-    use EDGrowthFunctionsMod , only : tree_lai, c_area
+    use FatesSizeAgeTypeIndicesMod, only : sizetype_class_index
     use EDtypesMod           , only : area
     use EDPftvarcon            , only : EDPftvarcon_inst
 
@@ -929,9 +924,9 @@ contains
 
              
              currentCohort%b = currentCohort%balive+currentCohort%bdead+currentCohort%bstore
+             call carea_allom(currentCohort%dbh,currentCohort%n,sites(s)%spread,currentCohort%pft,currentCohort%c_area)
              currentCohort%treelai = tree_lai(currentCohort)
-             
-             currentCohort%c_area = c_area(currentCohort)
+
              canopy_leaf_area = canopy_leaf_area + currentCohort%treelai *currentCohort%c_area
                   
              if(currentCohort%canopy_layer==1)then
@@ -984,7 +979,6 @@ contains
     !
     ! !USES:
 
-    use EDGrowthFunctionsMod , only : tree_lai, tree_sai, c_area 
     use EDtypesMod           , only : area, dinc_ed, hitemax, n_hite_bins
   
     !
@@ -1034,8 +1028,8 @@ contains
        currentPatch%canopy_layer_lai(:) = 0._r8
        NC = 0
        currentCohort => currentPatch%shortest
-       do while(associated(currentCohort))       
-          currentCohort%c_area = c_area(currentCohort)
+       do while(associated(currentCohort))     
+          call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)  
           currentPatch%canopy_area = currentPatch%canopy_area + currentCohort%c_area
           NC = NC+1
           currentCohort => currentCohort%taller    
@@ -1602,8 +1596,8 @@ contains
      
      layer_area = 0.0_r8
      currentCohort => currentPatch%tallest
-     do while (associated(currentCohort))   
-        currentCohort%c_area = c_area(currentCohort) ! Reassess cohort area. 
+     do while (associated(currentCohort))
+        call carea_allom(currentCohort%dbh,currentCohort%n,currentPatch%siteptr%spread,currentCohort%pft,currentCohort%c_area)
         if (currentCohort%canopy_layer .eq. layer_index) then
            layer_area = layer_area + currentCohort%c_area
         end if
@@ -1631,7 +1625,7 @@ contains
      type(ed_cohort_type),pointer :: currentCohort
      
      integer :: z
-     
+     real(r8) :: c_area
      real(r8) :: arealayer
      
      z = 1
@@ -1646,7 +1640,8 @@ contains
         currentCohort => currentPatch%tallest
         do while (associated(currentCohort))  
            if(currentCohort%canopy_layer == z) then
-              arealayer = arealayer + c_area(currentCohort)
+              call carea_allom(currentCohort%dbh,currentCohort%n,currentPatch%siteptr%spread,currentCohort%pft,c_area)
+              arealayer = arealayer + c_area
            end if
            currentCohort => currentCohort%shorter
         enddo

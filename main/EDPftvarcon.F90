@@ -26,10 +26,11 @@ module EDPftvarcon
   !ED specific variables. 
   type, public ::  EDPftvarcon_type
      real(r8), allocatable :: pft_used           (:) ! Switch to turn on and off PFTs
-     real(r8), allocatable :: max_dbh            (:) ! maximum dbh at which height growth ceases...
+    
      real(r8), allocatable :: freezetol          (:) ! minimum temperature tolerance (NOT CURRENTY USED)
      real(r8), allocatable :: wood_density       (:) ! wood density  g cm^-3  ...
      real(r8), allocatable :: hgt_min            (:) ! sapling height m
+     real(r8), allocatable :: dbh_repro_threshold(:) ! diameter at which mature plants shift allocation
      real(r8), allocatable :: dleaf              (:) ! leaf characteristic dimension length (m)
      real(r8), allocatable :: z0mr               (:) ! ratio of roughness length of vegetation to height (-) 
      real(r8), allocatable :: displar            (:) ! ratio of displacement height to canopy top height (-)
@@ -45,6 +46,7 @@ module EDPftvarcon
      real(r8), allocatable :: root_long          (:) ! root longevity (yrs)
      real(r8), allocatable :: clone_alloc        (:) ! fraction of carbon balance allocated to clonal reproduction.
      real(r8), allocatable :: seed_alloc         (:) ! fraction of carbon balance allocated to seeds.
+     real(r8), allocatable :: c2b                (:) ! Carbon to biomass multiplier [kg/kgC]
      real(r8), allocatable :: woody(:)
      real(r8), allocatable :: stress_decid(:)
      real(r8), allocatable :: season_decid(:)
@@ -67,8 +69,6 @@ module EDPftvarcon
      real(r8), allocatable :: smpso(:)
      real(r8), allocatable :: smpsc(:)
      real(r8), allocatable :: grperc(:) 
-     
-     
      real(r8), allocatable :: bmort(:)
      real(r8), allocatable :: hf_sm_threshold(:)
      real(r8), allocatable :: vcmaxha(:)
@@ -98,7 +98,9 @@ module EDPftvarcon
                                                     ! Equation 16 Thonicke et al 2010
 
      ! Allometry Parameters
-     ! --------------------------------------------------------------------------------------------
+     ! -------------------------------------------------------------------------------------------- 
+     real(r8), allocatable :: allom_dbh_maxheight(:) ! dbh at which height growth ceases
+     
      real(r8), allocatable :: allom_hmode(:)        ! height allometry function type
      real(r8), allocatable :: allom_lmode(:)        ! maximum leaf allometry function type
      real(r8), allocatable :: allom_fmode(:)        ! maximum root allometry function type
@@ -117,9 +119,10 @@ module EDPftvarcon
      real(r8), allocatable :: allom_d2bl2(:)        ! Parameter 2 for d2bl allometry (slope)
      real(r8), allocatable :: allom_d2bl3(:)           ! Parameter 3 for d2bl allometry (optional)
      real(r8), allocatable :: allom_sai_scaler(:)      ! 
-     real(r8), allocatable :: allom_d2bl_slascaler(:)  ! 
      real(r8), allocatable :: allom_blca_expnt_diff(:) ! Any difference in the exponent between the leaf
                                                        ! biomass and crown area scaling
+     real(r8), allocatable :: allom_d2ca_coefficient_max(:)  ! upper (savanna) value for crown area to dbh coefficient
+     real(r8), allocatable :: allom_d2ca_coefficient_min(:)  ! lower (closed-canopy forest) value for crown area to dbh coefficient
      real(r8), allocatable :: allom_agb1(:)         ! Parameter 1 for agb allometry
      real(r8), allocatable :: allom_agb2(:)         ! Parameter 2 for agb allometry
      real(r8), allocatable :: allom_agb3(:)         ! Parameter 3 for agb allometry
@@ -250,7 +253,7 @@ contains
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
-    name = 'fates_max_dbh'
+    name = 'fates_dbh_repro_threshold'
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
@@ -307,6 +310,10 @@ contains
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
     name = 'fates_seed_alloc'
+    call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
+         dimension_names=dim_names, lower_bounds=dim_lower_bound)
+
+    name = 'fates_c2b'
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
@@ -426,6 +433,10 @@ contains
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
           dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
+    name = 'fates_allom_dbh_maxheight'
+    call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
+         dimension_names=dim_names, lower_bounds=dim_lower_bound)
+
     name = 'fates_allom_hmode'
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
           dimension_names=dim_names, lower_bounds=dim_lower_bound)
@@ -473,7 +484,7 @@ contains
     name = 'fates_allom_d2h3'
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
-
+    
     name = 'fates_allom_d2bl1'
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
@@ -490,7 +501,11 @@ contains
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
-    name = 'fates_allom_d2bl_slascaler'
+    name = 'fates_allom_d2ca_coefficient_max'
+    call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
+         dimension_names=dim_names, lower_bounds=dim_lower_bound)
+
+    name = 'fates_allom_d2ca_coefficient_min'
     call fates_params%RegisterParameter(name=name, dimension_shape=dimension_shape_1d, &
          dimension_names=dim_names, lower_bounds=dim_lower_bound)
 
@@ -638,9 +653,9 @@ contains
     call fates_params%RetreiveParameterAllocate(name=name, &
          data=this%pft_used)
 
-    name = 'fates_max_dbh'
+    name = 'fates_dbh_repro_threshold'
     call fates_params%RetreiveParameterAllocate(name=name, &
-         data=this%max_dbh)
+         data=this%dbh_repro_threshold)
 
     name = 'fates_freezetol'
     call fates_params%RetreiveParameterAllocate(name=name, &
@@ -697,6 +712,10 @@ contains
     name = 'fates_seed_alloc'
     call fates_params%RetreiveParameterAllocate(name=name, &
          data=this%seed_alloc)
+
+    name = 'fates_c2b'
+    call fates_params%RetreiveParameterAllocate(name=name, &
+         data=this%c2b)
 
     name = 'fates_woody'
     call fates_params%RetreiveParameterAllocate(name=name, &
@@ -810,6 +829,10 @@ contains
     call fates_params%RetreiveParameterAllocate(name=name, &
          data=this%fire_alpha_SH)
 
+    name = 'fates_allom_dbh_maxheight'
+    call fates_params%RetreiveParameterAllocate(name=name, &
+          data=this%allom_dbh_maxheight)
+
     name = 'fates_allom_hmode'
     call fates_params%RetreiveParameterAllocate(name=name, &
          data=this%allom_hmode)
@@ -878,9 +901,13 @@ contains
     call fates_params%RetreiveParameterAllocate(name=name, &
          data=this%allom_blca_expnt_diff)
 
-    name = 'fates_allom_d2bl_slascaler'
+    name = 'fates_allom_d2ca_coefficient_max'
     call fates_params%RetreiveParameterAllocate(name=name, &
-         data=this%allom_d2bl_slascaler)
+         data=this%allom_d2ca_coefficient_max)
+
+    name = 'fates_allom_d2ca_coefficient_min'
+    call fates_params%RetreiveParameterAllocate(name=name, &
+         data=this%allom_d2ca_coefficient_min)
 
     name = 'fates_allom_sai_scaler'
     call fates_params%RetreiveParameterAllocate(name=name, &
@@ -1360,7 +1387,8 @@ contains
 
         write(fates_log(),*) '-----------  FATES PFT Parameters -----------------'
         write(fates_log(),fmt0) 'pft_used = ',EDPftvarcon_inst%pft_used
-        write(fates_log(),fmt0) 'max_dbh = ',EDPftvarcon_inst%max_dbh
+        write(fates_log(),fmt0) 'dbh max height = ',EDPftvarcon_inst%allom_dbh_maxheight
+        write(fates_log(),fmt0) 'dbh mature = ',EDPftvarcon_inst%dbh_repro_threshold
         write(fates_log(),fmt0) 'freezetol = ',EDPftvarcon_inst%freezetol
         write(fates_log(),fmt0) 'wood_density = ',EDPftvarcon_inst%wood_density
         write(fates_log(),fmt0) 'hgt_min = ',EDPftvarcon_inst%hgt_min
@@ -1400,6 +1428,7 @@ contains
         write(fates_log(),fmt0) 'smpso = ',EDPftvarcon_inst%smpso
         write(fates_log(),fmt0) 'smpsc = ',EDPftvarcon_inst%smpsc
         write(fates_log(),fmt0) 'grperc = ',EDPftvarcon_inst%grperc
+        write(fates_log(),fmt0) 'c2b = ',EDPftvarcon_inst%c2b
         write(fates_log(),fmt0) 'bmort = ',EDPftvarcon_inst%bmort
         write(fates_log(),fmt0) 'hf_sm_threshold = ',EDPftvarcon_inst%hf_sm_threshold
         write(fates_log(),fmt0) 'vcmaxha = ',EDPftvarcon_inst%vcmaxha
@@ -1439,8 +1468,9 @@ contains
         write(fates_log(),fmt0) 'allom_d2bl2 = ',EDPftvarcon_inst%allom_d2bl2
         write(fates_log(),fmt0) 'allom_d2bl3 = ',EDPftvarcon_inst%allom_d2bl3
         write(fates_log(),fmt0) 'allom_sai_scaler = ',EDPftvarcon_inst%allom_sai_scaler
-        write(fates_log(),fmt0) 'allom_d2bl_slascaler = ',EDPftvarcon_inst%allom_d2bl_slascaler
         write(fates_log(),fmt0) 'allom_blca_expnt_diff = ',EDPftvarcon_inst%allom_blca_expnt_diff
+        write(fates_log(),fmt0) 'allom_d2ca_coefficient_max = ',EDPftvarcon_inst%allom_d2ca_coefficient_max
+        write(fates_log(),fmt0) 'allom_d2ca_coefficient_min = ',EDPftvarcon_inst%allom_d2ca_coefficient_min        
         write(fates_log(),fmt0) 'allom_agb1 = ',EDPftvarcon_inst%allom_agb1
         write(fates_log(),fmt0) 'allom_agb2 = ',EDPftvarcon_inst%allom_agb2
         write(fates_log(),fmt0) 'allom_agb3 = ',EDPftvarcon_inst%allom_agb3

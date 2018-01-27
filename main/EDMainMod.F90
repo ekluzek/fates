@@ -34,7 +34,7 @@ module EDMainMod
   use EDPhysiologyMod          , only : recruitment
   use EDPhysiologyMod          , only : trim_canopy
   use SFMainMod                , only : fire_model 
-  use EDTypesMod               , only : get_age_class_index
+  use FatesSizeAgeTypeIndicesMod, only : get_age_class_index
   use EDtypesMod               , only : ncwd
   use EDtypesMod               , only : ed_site_type
   use EDtypesMod               , only : ed_patch_type
@@ -225,7 +225,6 @@ contains
     ! FIX(SPM,032414) refactor so everything goes through interface
     !
     ! !USES:
-    use EDTypesMod, only : ageclass_ed
     !
     ! !ARGUMENTS:
     type(ed_site_type)     , intent(inout) :: currentSite
@@ -272,6 +271,7 @@ contains
           currentCohort%dbh    = max(small_no,currentCohort%dbh    + currentCohort%ddbhdt    * hlm_freq_day )
           currentCohort%balive = currentCohort%balive + currentCohort%dbalivedt * hlm_freq_day 
           currentCohort%bdead  = max(small_no,currentCohort%bdead  + currentCohort%dbdeaddt  * hlm_freq_day )
+
           if ( DEBUG ) then
              write(fates_log(),*) 'EDMainMod dbstoredt I ',currentCohort%bstore, &
                   currentCohort%dbstoredt,hlm_freq_day
@@ -298,6 +298,7 @@ contains
           currentCohort%npp_acc  = 0.0_r8
           currentCohort%gpp_acc  = 0.0_r8
           currentCohort%resp_acc = 0.0_r8
+          
           
           call allocate_live_biomass(currentCohort,1)
 
@@ -380,7 +381,6 @@ contains
           currentSite%seed_bank(ft) = small_no
        endif
     enddo
-
 
   end subroutine ed_integrate_state_variables
 
@@ -611,7 +611,6 @@ contains
           currentCohort%bmort = 0.0_r8
           currentCohort%hmort = 0.0_r8
           currentCohort%cmort = 0.0_r8
-          currentCohort%imort = 0.0_r8
           currentCohort%fmort = 0.0_r8
 
           currentCohort => currentCohort%taller

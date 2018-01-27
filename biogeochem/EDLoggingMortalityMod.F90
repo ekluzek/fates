@@ -36,6 +36,7 @@ module EDLoggingMortalityMod
    use FatesInterfaceMod , only : hlm_model_day
    use FatesInterfaceMod , only : hlm_day_of_year 
    use FatesInterfaceMod , only : hlm_days_per_year
+   use FatesInterfaceMod , only : hlm_use_logging
    use FatesConstantsMod , only : itrue,ifalse
    use FatesGlobals      , only : endrun => fates_endrun 
    use FatesGlobals      , only : fates_log
@@ -78,8 +79,7 @@ contains
       logging_time = .false.
       icode = int(logging_event_code)
 
-!      if(hlm_use_logging.eq.ifalse) return     ! Don't turn on until fates-clm adds
-                                                ! this to the interface (RGK 08-2017)
+      if(hlm_use_logging.eq.ifalse) return
 
       if(icode .eq. 1) then
          ! Logging is turned off
@@ -225,7 +225,8 @@ contains
       use EDtypesMod,   only : ed_site_type
       use EDtypesMod,   only : ed_patch_type
       use EDtypesMod,   only : ed_cohort_type
-      use EDGrowthFunctionsMod, only : c_area
+      use FatesAllometryMod , only : carea_allom
+
 
       ! !ARGUMENTS:
       type(ed_site_type)  , intent(inout), target  :: currentSite 
@@ -451,7 +452,7 @@ contains
 
       currentCohort => newPatch%shortest
       do while(associated(currentCohort))
-         currentCohort%c_area = c_area(currentCohort)
+         call carea_allom(currentCohort%dbh,currentCohort%n,currentSite%spread,currentCohort%pft,currentCohort%c_area)
          currentCohort => currentCohort%taller
       enddo
 
